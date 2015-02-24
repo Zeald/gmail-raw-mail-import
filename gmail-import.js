@@ -1,6 +1,12 @@
 var fs = require('fs');
 var path = require('path');
 var _ = require('underscore');
+var googleapis = require('googleapis');
+var directory = googleapis.admin('directory_v1');
+var gmail = googleapis.gmail('v1');
+var walk = require('fs-walk');
+var Q = require('q');
+var levelup = require('levelup')
 
 console.log(process.argv);
 var spool_dir = process.argv[2];
@@ -15,20 +21,12 @@ if (! subject_email) {
 	process.exit();
 }
 
-var googleapis = require('googleapis');
-var directory = googleapis.admin('directory_v1');
-var gmail = googleapis.gmail('v1');
-var walk = require('fs-walk');
-var Q = require('q');
-var levelup = require('levelup')
-
 //How many simultanous requests to do
 const CONCURRENCY  = 20;
 const MAX_WAIT  = 30; //Maximum number of seconds to wait in exponential backoff
 
 // Google api scopes we'll need access to:
 const SCOPES = [
-  'https://www.googleapis.com/auth/admin.directory.user.readonly',
   'https://mail.google.com/'
 ];
 
@@ -39,13 +37,13 @@ const IGNORE_FILES = ['cyrus.index', 'cyrus.cache', 'cyrus.header', 'cyrus.squat
 
 //Folder names to map to specific labels in gmail
 const LABEL_MAPPINGS = {
-	'Sent' : 'SENT',
+	'Sent' : 'INBOX',//gmail doesn't seem to like you inserting directly in sent items
 	'.' : 'INBOX'
 }
 
 
 
-var seen_db = levelup(path.join(process.env.HOME || process.env.HOMEPATH || process.env.USERPROFILE, '.gmail-raw-mail-import'));
+var seen_db = levelup(path.join(process.env.HOME || process.env.HOMEPATH || process.env.USERPROFILE, '.gmail-raw-mail-import', subject_email));
 
 
 //Runs google api calls, resolves a promise when they're all done, and does "Exponential backoff" like google likes
@@ -123,8 +121,9 @@ function parallelCall(actions)  {
 					action().then(next).fail(retry);
 				}, wait_seconds * 1000 + rand() * 1000 );
 			}
-			else {
+			else {				
 				throw err;
+				process.exit();
 			}
 		}
 
@@ -138,6 +137,7 @@ function parallelCall(actions)  {
 	return deferred.promise;
 }
 
+//Create all the folders in the mailbox as gmail labels
 function createLabels(dir, subject_email, callback) {
 	console.log('1. - Create labels in gmail for all folders for ' + subject_email);
 	var labels = {};
@@ -184,11 +184,8 @@ function createLabels(dir, subject_email, callback) {
 			var actions = [];
 			for (i in create_labels) {
 				var name = create_labels[i];
+
 				//Create an array of Promise-returning functions to run in parallel:
-				console.log(					{
-					userId: subject_email,
-					name: name,
-					});
 				actions.push(Q.nfbind(
 					gmail.users.labels.create.bind(gmail.users.labels),
 					{
@@ -227,24 +224,29 @@ function createLabels(dir, subject_email, callback) {
 		})
 }
 
+
+//Import the actual messages from the spool
 function importSpoolFiles(dir, subject_email, labels) {
 	var files = [];
 	var files_done = Q.defer();
 
+	//This walks the spool adding all the files to a queue for the google api requests to consume.
+	// Note we're doing this in parallel with the process of transmitting the files to google, because in a large spool this can take a while.
 	walk.files(dir, function(basedir, filename, stat, next) {
 		for (i in IGNORE_DIRS) {
 			if (basedir.match('(.*/|^)' + IGNORE_DIRS[i] + '(/.*|$)') || filename.match(IGNORE_DIRS[i])) return next();
 		}
-
 		for (i in IGNORE_FILES) {
 			if (filename.match(IGNORE_FILES[i])) return next();
 		}
-
-//		console.log("Adding file: ", path.join(basedir, filename));
 		var file = path.join(basedir, filename);
 		seen_db.get(file, function(err, value) {
+
 			if (! value ){
 				files.push(file);
+			}
+			else {
+				console.log("Seen  " + file, err, value);
 			}
 		})
 
@@ -254,62 +256,57 @@ function importSpoolFiles(dir, subject_email, labels) {
 		files_done.resolve();
 	});
 
-	//Generate the next file (it'd like to be an Ecmascript 6 generator: newfangled!)
+	//A function to generate the next file (it'd like to be an Ecmascript 6 generator: newfangled! but too newfangled, don't want to depend on bleeding edge nodejs)
 	var next_file = function() {
 		if (! files_done.resolved) {
-			file = files.shift();
+			var file = files.shift();
 			if (file) {
 				//Determine the correct labels:
 				var relative = path.relative(dir, file);
 				var folder = path.dirname(relative);
 				var label = labels[folder];
 				console.log("Uploading file " + file + "Folder: " + folder + " -> Label: " + label);
-				console.log(relative, folder, label);
+//				console.log(relative, folder, label);
 				if (! label) {
 					throw new Error("No label found");
 				}
 				//			var file = path.join(spool_dir, files[i]);
 
 				return { 
+					//A function to actually do the api call.  Q.nfbind wraps it in a promise-returning function:
 					value : Q.nfbind(
 							function(callback) { 
 								gmail.users.messages.insert({
-								userId: subject_email,
-								internalDateSource: 'dateHeader',
-								resource : {
-									'labelIds': [label],
+									userId: subject_email,
+									internalDateSource: 'dateHeader',
+									resource : {
+										'labelIds': [label],
+									},
+									media: {
+										mimeType: 'message/rfc822',
+										body: fs.createReadStream(file)
+									}, 
 								},
-								media: {
-									mimeType: 'message/rfc822',
-									body: fs.createReadStream(file)
-								}, 
-							},
-															
-															function(err, result) {
-																if (! err) {
-																	seen_db.put(file, true, function(err) {
-																		if (err) return console.log('Error updating database', err) // some kind of I/O error
-																	})
-																}
-																callback(err, result)
-															});
-
-
-
-
+								function(err, result) {
+									if (err) console.error(err);
+									if (! err) {
+										seen_db.put(file, true, function(err) {
+											if (err) return console.log('Error updating database', err) // some kind of I/O error
+										})
+									}
+									callback(err, result)
+								});
 							}							
-						),
+					),
 					done : false 
 				}
-
 			}
 			else {
 				return {
 					value :  null,
 					done : false
 				}
-			}
-			
+			}			
 		}
 		else {
 			return { 
@@ -319,37 +316,39 @@ function importSpoolFiles(dir, subject_email, labels) {
 		}
 	};
 
+	//Fire off the google api requests
 	var migrated_count = 0;
 	var start_time = Date.now();
 	parallelCall(next_file)
 		.progress( function(result) {
 			console.log(result);
 			migrated_count ++;
-			//Messages/hour:
 			var current_time = Date.now();
 			var elapsed = Math.round((current_time - start_time) / 1000);
 			var messages_per_hour = Math.round((migrated_count/( elapsed || 1) )*3600, 1);
-			var percent = Math.round(migrated_count / + (files.length + migrated_count), 1);
+			var percent = Math.round(100* migrated_count / + (files.length + migrated_count), 1);
 			var eta  = Math.round(files.length / (messages_per_hour | 1),2)
 			console.log(elapsed +"s Migrated " + migrated_count + "/" + (files.length + migrated_count) + " " + percent + "% " +  messages_per_hour + "p/h ETA: " + eta + 'h');
 		} )
 		.then( function(results) {
 			console.log("Migrated dir " + dir , results);
 		})
-		.catch(function(err) {
+		.fail(function(err) {
 			console.error('ERROR');
+			process.exit();
 		});	
 }
 
-
+//Migrate a user's mailbox
 function migrateUser(dir, subject_email) { 
-
 	//https://developers.google.com/admin-sdk/directory/v1/guides/delegation
 	// Convert to a PEM  key as per ; https://github.com/google/google-api-nodejs-client
 	// openssl pkcs12 -in key.p12 -nocerts -passin pass:notasecret -nodes -out key.pem
+	var key_path = 		path.join(process.env.HOME || process.env.HOMEPATH || process.env.USERPROFILE, 'key.pem'); //The key from above, assumed to be in your home dir
+	console.log("Auth with google using " + service_account_email + " and key " + key_path);
 	var jwtClient = new googleapis.auth.JWT(
 		service_account_email,
-		path.join(process.env.HOME || process.env.HOMEPATH || process.env.USERPROFILE, 'key.pem'), //The key from above, assumed to be in your home dir
+		key_path,
 		null,
 		SCOPES,
 		subject_email
