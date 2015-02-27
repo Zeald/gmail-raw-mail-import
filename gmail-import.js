@@ -23,7 +23,7 @@ if (! subject_email) {
 
 //How many simultanous requests to do
 const CONCURRENCY  = 20;
-const MAX_WAIT  = 30; //Maximum number of seconds to wait in exponential backoff
+const MAX_WAIT  = 300; //Maximum number of seconds to wait in exponential backoff
 
 // Google api scopes we'll need access to:
 const SCOPES = [
@@ -41,7 +41,19 @@ const LABEL_MAPPINGS = {
 	'.' : 'INBOX'
 }
 
+//https://developers.google.com/admin-sdk/directory/v1/guides/delegation
+// Convert to a PEM  key as per ; https://github.com/google/google-api-nodejs-client
+// openssl pkcs12 -in key.p12 -nocerts -passin pass:notasecret -nodes -out key.pem
 
+var key_path = path.join(process.env.HOME || process.env.HOMEPATH || process.env.USERPROFILE, 'key.pem');
+var jwtClient = new googleapis.auth.JWT(
+	service_account_email,
+	key_path,
+	null,
+	SCOPES,
+	subject_email
+);
+var authorising = false;
 
 var seen_db = levelup(path.join(process.env.HOME || process.env.HOMEPATH || process.env.USERPROFILE, '.gmail-raw-mail-import', subject_email));
 
@@ -103,32 +115,56 @@ function parallelCall(actions)  {
 
 		if (active >= CONCURRENCY) return;
 		active ++;
-
+		retry_count = 0;
 		//A closure, to handle retrying this action:
 		var retry = function(err, response) {
 			//Is the error a 403 response?
 			console.log("Error in action", err);
-			if (err.code == 403) {
+			var exponential_backoff = function() {
 				retry_count ++;
 				var wait_seconds = 2 ^ retry_count;
 				if (wait_seconds > MAX_WAIT) {
 					console.log("Asked to wait more than MAX_WAIT seconds, so dieing");
 					process.exit();
 				}
-				console.log("Got 403 rate limiting response from google.  Waiting " + wait_seconds);
+				console.log("Rate limiting response from google.  Waiting " + wait_seconds);
 				setTimeout( function() {
 					//Call the action again:
-					action().then(next).fail(retry);
-				}, wait_seconds * 1000 + rand() * 1000 );
+					action().then(next).catch(retry).done();
+				}, wait_seconds * 1000 + Math.random() * 1000 );
+
 			}
-			else {				
+			if (err.code == 401) { //We need to reauth?
+				if (! authorising) {
+					authorising = true;
+					jwtClient.authorize(function(err, tokens) {
+						authorising = false;
+						if (err) {
+							
+							console.log(err);
+							return;
+						}
+						console.log('0 - Re-authed with google.');
+					});
+				}
+
+				exponential_backoff();
+			}
+			if (err.code == 403) {  //A google rate-limiting response
+				exponential_backoff();
+			}
+			if (err.code == 400 || err.code == 500 ) { //Somethings broken about our request ; die to let the operator know.
 				throw err;
 				process.exit();
+
+			}
+			else {	//Who knows what's happened, let's try again in a bit:
+				exponential_backoff();				
 			}
 		}
 
 		var action = next_action.value;
-		action().then(next).fail(retry);
+		action().then(next).catch(retry).done();
 	}
 	for (i = 0 ;  i< CONCURRENCY;  i++ ) {
 		console.log("Firing off another action");
@@ -341,18 +377,7 @@ function importSpoolFiles(dir, subject_email, labels) {
 
 //Migrate a user's mailbox
 function migrateUser(dir, subject_email) { 
-	//https://developers.google.com/admin-sdk/directory/v1/guides/delegation
-	// Convert to a PEM  key as per ; https://github.com/google/google-api-nodejs-client
-	// openssl pkcs12 -in key.p12 -nocerts -passin pass:notasecret -nodes -out key.pem
-	var key_path = 		path.join(process.env.HOME || process.env.HOMEPATH || process.env.USERPROFILE, 'key.pem'); //The key from above, assumed to be in your home dir
 	console.log("Auth with google using " + service_account_email + " and key " + key_path);
-	var jwtClient = new googleapis.auth.JWT(
-		service_account_email,
-		key_path,
-		null,
-		SCOPES,
-		subject_email
-	);
 	googleapis.options({ auth: jwtClient });
 	jwtClient.authorize(function(err, tokens) {
 		if (err) {
