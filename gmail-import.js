@@ -299,67 +299,69 @@ function importSpoolFiles(dir, subject_email, labels) {
 
 	//A function to generate the next file (it'd like to be an Ecmascript 6 generator: newfangled! but too newfangled, don't want to depend on bleeding edge nodejs)
 	var next_file = function() {
-		if (! files_done.promise.isFulfilled()) {
-			var file = files.shift();
-			if (file) {
-				//Determine the correct labels:
-				var relative = path.relative(dir, file);
-				var folder = path.dirname(relative);
-
-				//Map the path name
-				var name =  _.map(folder.split(path.sep), function(folder) {
-					return  LABEL_MAPPINGS[folder] || folder;
-				}).join(path.sep);
-
-				var label = labels[name];
-				console.log("Uploading file " + file + "Folder: " + folder + " -> Label: " + label);
-				console.log(relative, folder, label);
-				if (! label) {
-					throw new Error("No label found");
-				}
-				//			var file = path.join(spool_dir, files[i]);
-
-				return { 
-					//A function to actually do the api call.  Q.nfbind wraps it in a promise-returning function:
-					value : Q.nfbind(
-							function(callback) { 
-								gmail.users.messages.insert({
-									userId: subject_email,
-									internalDateSource: 'dateHeader',
-									resource : {
-										'labelIds': [label],
-									},
-									media: {
-										mimeType: 'message/rfc822',
-										body: fs.createReadStream(file)
+		var file = files.shift();
+		if (file) {
+			//Determine the correct labels:
+			var relative = path.relative(dir, file);
+			var folder = path.dirname(relative);
+			
+			//Map the path name
+			var name =  _.map(folder.split(path.sep), function(folder) {
+				return  LABEL_MAPPINGS[folder] || folder;
+			}).join(path.sep);
+			
+			var label = labels[name];
+			console.log("Uploading file " + file + "Folder: " + folder + " -> Label: " + label);
+			console.log(relative, folder, label);
+			if (! label) {
+				throw new Error("No label found");
+			}
+			//			var file = path.join(spool_dir, files[i]);
+			
+			return { 
+				//A function to actually do the api call.  Q.nfbind wraps it in a promise-returning function:
+				value : Q.nfbind(
+					function(callback) { 
+						gmail.users.messages.insert({
+							userId: subject_email,
+							internalDateSource: 'dateHeader',
+							resource : {
+								'labelIds': [label],
+							},
+							media: {
+								mimeType: 'message/rfc822',
+								body: fs.createReadStream(file)
 									}, 
-								},
-								function(err, result) {
-									if (err) console.error(err);
-									if (! err) {
-										seen_db.put(file, true, function(err) {
-											if (err) return console.log('Error updating database', err) // some kind of I/O error
-										})
-									}
-									callback(err, result)
-								});
-							}							
+						},
+													function(err, result) {
+														if (err) console.error(err);
+														if (! err) {
+															seen_db.put(file, true, function(err) {
+																if (err) return console.log('Error updating database', err) // some kind of I/O error
+															})
+														}
+														callback(err, result)
+													});
+					}							
 					),
 					done : false 
-				}
 			}
-			else {
+		}
+		else {
+			//No files in the list, perhaps we are waiting for the file scanning to add them?
+			if (! files_done.promise.isFulfilled()) {
 				return {
 					value :  null,
 					done : false
 				}
 			}			
-		}
-		else {
-			return { 
-				value : null,
-				done : true
-			};
+			else {
+				return { 
+					value : null,
+					done : true
+				};
+			}
+
 		}
 	};
 
