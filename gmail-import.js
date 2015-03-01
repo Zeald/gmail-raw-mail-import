@@ -7,6 +7,7 @@ var gmail = googleapis.gmail('v1');
 var walk = require('fs-walk');
 var Q = require('q');
 var levelup = require('levelup')
+var util = require('util');
 
 console.log(process.argv);
 var spool_dir = process.argv[2];
@@ -23,7 +24,7 @@ if (! subject_email) {
 
 //How many simultanous requests to do
 const CONCURRENCY  = 20;
-const MAX_WAIT  = 300; //Maximum number of seconds to wait in exponential backoff
+const MAX_WAIT  = 30*60; //Maximum number of seconds to wait in exponential backoff
 
 // Google api scopes we'll need access to:
 const SCOPES = [
@@ -38,7 +39,8 @@ const IGNORE_FILES = ['cyrus.index', 'cyrus.cache', 'cyrus.header', 'cyrus.squat
 //Folder names to map to specific labels in gmail
 const LABEL_MAPPINGS = {
 	'Sent' : 'INBOX',//gmail doesn't seem to like you inserting directly in sent items
-	'.' : 'INBOX'
+	'.' : 'INBOX',
+	'Archive': 'Archives' //Another reserved label name
 }
 
 //https://developers.google.com/admin-sdk/directory/v1/guides/delegation
@@ -150,10 +152,10 @@ function parallelCall(actions)  {
 
 				exponential_backoff();
 			}
-			if (err.code == 403) {  //A google rate-limiting response
+			else if (err.code == 403) {  //A google rate-limiting response
 				exponential_backoff();
 			}
-			if (err.code == 400 || err.code == 500 ) { //Somethings broken about our request ; die to let the operator know.
+			else if (err.code == 400  ) { //Somethings broken about our request ; die to let the operator know.
 				throw err;
 				process.exit();
 
@@ -177,10 +179,6 @@ function parallelCall(actions)  {
 function createLabels(dir, subject_email, callback) {
 	console.log('1. - Create labels in gmail for all folders for ' + subject_email);
 	var labels = {};
-	//Insert the label mappings:
-	for (folder in LABEL_MAPPINGS) {
-		labels[folder] = LABEL_MAPPINGS[folder]
-	}
 
 	var mailbox_folders = ['.'];
 
@@ -210,7 +208,12 @@ function createLabels(dir, subject_email, callback) {
 			//Find folders that don't have a label yet;
 			var create_labels = [];
 			for (i in mailbox_folders) {
-				var name = LABEL_MAPPINGS[mailbox_folders[i]] || mailbox_folders[i];
+				var folder = mailbox_folders[i];
+
+				//Map the path name
+				var name  = _.map(folder.split(path.sep), function(folder) {
+					return  LABEL_MAPPINGS[folder] || folder;
+				}).join(path.sep);
 				if (! labels[name]) {
 					console.log("No gmail label found for ", mailbox_folders[i]);
 					create_labels.push(name);
@@ -218,6 +221,7 @@ function createLabels(dir, subject_email, callback) {
 			}
 			var create = [];
 			var actions = [];
+
 			for (i in create_labels) {
 				var name = create_labels[i];
 
@@ -256,7 +260,8 @@ function createLabels(dir, subject_email, callback) {
 					console.log("ERROR creating labels");
 					console.error(err)
 					throw err;
-				});
+				})
+			    .done();
 		})
 }
 
@@ -294,15 +299,21 @@ function importSpoolFiles(dir, subject_email, labels) {
 
 	//A function to generate the next file (it'd like to be an Ecmascript 6 generator: newfangled! but too newfangled, don't want to depend on bleeding edge nodejs)
 	var next_file = function() {
-		if (! files_done.resolved) {
+		if (! files_done.promise.isFulfilled()) {
 			var file = files.shift();
 			if (file) {
 				//Determine the correct labels:
 				var relative = path.relative(dir, file);
 				var folder = path.dirname(relative);
-				var label = labels[folder];
+
+				//Map the path name
+				var name =  _.map(folder.split(path.sep), function(folder) {
+					return  LABEL_MAPPINGS[folder] || folder;
+				}).join(path.sep);
+
+				var label = labels[name];
 				console.log("Uploading file " + file + "Folder: " + folder + " -> Label: " + label);
-//				console.log(relative, folder, label);
+				console.log(relative, folder, label);
 				if (! label) {
 					throw new Error("No label found");
 				}
@@ -366,13 +377,15 @@ function importSpoolFiles(dir, subject_email, labels) {
 			var eta  = Math.round(files.length / (messages_per_hour | 1),2)
 			console.log(elapsed +"s Migrated " + migrated_count + "/" + (files.length + migrated_count) + " " + percent + "% " +  messages_per_hour + "p/h ETA: " + eta + 'h');
 		} )
-		.then( function(results) {
-			console.log("Migrated dir " + dir , results);
-		})
 		.fail(function(err) {
 			console.error('ERROR');
 			process.exit();
-		});	
+		})
+		.done( function(results) {
+			console.log("Migrated dir " + dir , results);
+		})
+
+	;	
 }
 
 //Migrate a user's mailbox
