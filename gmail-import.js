@@ -14,11 +14,12 @@ var spool_dir = process.argv[2];
 
 //You find these under "Security", API Reference https://console.developers.google.com
 var service_account_email = process.argv[3];
-var subject_email = process.argv[4];
+var key_path =  process.argv[4];
+var subject_email = process.argv[5];
 
 
 if (! subject_email) {
-	console.log("Usage: node gmail-import.js [spool dir] [service account email] [email to migrate too]");
+	console.log("Usage: node gmail-import.js [spool dir] [service account email] [key path] [email to migrate too]");
 	process.exit();
 }
 
@@ -40,6 +41,8 @@ const IGNORE_FILES = ['cyrus.index', 'cyrus.cache', 'cyrus.header', 'cyrus.squat
 const LABEL_MAPPINGS = {
 	'Sent' : 'INBOX',//gmail doesn't seem to like you inserting directly in sent items
 	'.' : 'INBOX',
+    'Important' : 'Important Email',
+    'important' : 'Important Email',
 	'Archive': 'Archives' //Another reserved label name
 }
 
@@ -47,7 +50,10 @@ const LABEL_MAPPINGS = {
 // Convert to a PEM  key as per ; https://github.com/google/google-api-nodejs-client
 // openssl pkcs12 -in key.p12 -nocerts -passin pass:notasecret -nodes -out key.pem
 
-var key_path = path.join(process.env.HOME || process.env.HOMEPATH || process.env.USERPROFILE, 'key.pem');
+
+
+//var key_path = path.join(process.env.HOME || process.env.HOMEPATH || process.env.USERPROFILE, 'key.pem');
+
 var jwtClient = new googleapis.auth.JWT(
 	service_account_email,
 	key_path,
@@ -121,7 +127,7 @@ function parallelCall(actions)  {
 		//A closure, to handle retrying this action:
 		var retry = function(err, response) {
 			//Is the error a 403 response?
-			console.log("Error in action", err);
+		    console.log("Error in action", err, action);
 			var exponential_backoff = function() {
 				retry_count ++;
 				var wait_seconds = 2 ^ retry_count;
@@ -198,7 +204,7 @@ function createLabels(dir, subject_email, callback) {
 		}, 
 		function(err, response) {
 			if (err) {
-				console.log('ERROR', err);
+				console.log('ERROR finding labels', err);
 				process.exit();
 			}	
 			for (i in response.labels) {
@@ -274,13 +280,21 @@ function importSpoolFiles(dir, subject_email, labels) {
 	//This walks the spool adding all the files to a queue for the google api requests to consume.
 	// Note we're doing this in parallel with the process of transmitting the files to google, because in a large spool this can take a while.
 	walk.files(dir, function(basedir, filename, stat, next) {
+	    
+
+
 		for (i in IGNORE_DIRS) {
 			if (basedir.match('(.*/|^)' + IGNORE_DIRS[i] + '(/.*|$)') || filename.match(IGNORE_DIRS[i])) return next();
 		}
 		for (i in IGNORE_FILES) {
 			if (filename.match(IGNORE_FILES[i])) return next();
 		}
-		var file = path.join(basedir, filename);
+	    var file = path.join(basedir, filename);
+	    if (stat.size > 32 * 1024 * 1024) {
+		console.log("FILE is > 32Mb and cannot be uploaded", file);
+		return next();
+	    }
+
 		seen_db.get(file, function(err, value) {
 
 			if (! value ){
@@ -396,8 +410,9 @@ function migrateUser(dir, subject_email) {
 	googleapis.options({ auth: jwtClient });
 	jwtClient.authorize(function(err, tokens) {
 		if (err) {
-			console.log(err);
-			return;
+		    console.log(err);
+		    throw(err);
+		    return;
 		}
 		console.log('0 - Authed with google.');
 		createLabels(dir, subject_email, function(labels) {
