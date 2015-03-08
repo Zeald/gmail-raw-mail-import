@@ -39,11 +39,10 @@ const IGNORE_FILES = ['cyrus.index', 'cyrus.cache', 'cyrus.header', 'cyrus.squat
 
 //Folder names to map to specific labels in gmail
 const LABEL_MAPPINGS = {
-	'Sent' : 'INBOX',//gmail doesn't seem to like you inserting directly in sent items
-	'.' : 'INBOX',
-    'Important' : 'Important Email',
-    'important' : 'Important Email',
-	'Archive': 'Archives' //Another reserved label name
+	'sent' : 'inbox',//gmail doesn't seem to like you inserting directly in sent items
+    '.' : 'inbox',
+    'important' : 'important email',
+    'archive': 'archives' //Another reserved label name
 }
 
 //https://developers.google.com/admin-sdk/directory/v1/guides/delegation
@@ -133,7 +132,6 @@ function parallelCall(actions)  {
 				var wait_seconds = 2 ^ retry_count;
 				if (wait_seconds > MAX_WAIT) {
 					console.log("Asked to wait more than MAX_WAIT seconds, so dieing");
-					process.exit();
 				}
 				console.log("Rate limiting response from google.  Waiting " + wait_seconds);
 				setTimeout( function() {
@@ -189,11 +187,15 @@ function createLabels(dir, subject_email, callback) {
 	var mailbox_folders = ['.'];
 
 	walk.dirsSync(spool_dir, function(basedir, filename, stat, next) {
+	    var folder = path.relative(spool_dir, path.join(basedir, filename));
 		for (i in IGNORE_DIRS) {
-			if (basedir.match('.*/' + IGNORE_DIRS[i] + '/.*') || filename.match(IGNORE_DIRS[i])) return;
+		    if (folder.match('^' + IGNORE_DIRS[i] + '(/.*)*$') ) {
+			console.log("Ignoring  " , folder);
+			return;
+		    }
 		}
 
-		mailbox_folders.push(path.relative(spool_dir, path.join(basedir, filename)));
+		mailbox_folders.push(folder);
 	}, function(err) {
 		if (err) console.log(err);
 	});
@@ -203,48 +205,58 @@ function createLabels(dir, subject_email, callback) {
 			userId: subject_email
 		}, 
 		function(err, response) {
-			if (err) {
-				console.log('ERROR finding labels', err);
-				process.exit();
-			}	
-			for (i in response.labels) {
-				labels[response.labels[i].name] = response.labels[i].id;
+		    if (err) {
+			console.log('ERROR finding labels', err);
+			process.exit();
+		    }	
+		    for (i in response.labels) {
+			labels[response.labels[i].name.toLowerCase() ] = response.labels[i].id;
+		    }
+
+
+		    var current_labels = _.pluck( response.labels, 'name');
+		    for (i in  current_labels.sort()) {
+			console.log(current_labels[i]);			
+		    }
+	    
+
+
+		    //Find folders that don't have a label yet;
+		    var create_labels = [];
+
+		    for (i in mailbox_folders) {
+			var folder = mailbox_folders[i];
+			
+			//Map the path name
+			var name  = _.map(folder.split(path.sep), function(folder) {
+			    return  LABEL_MAPPINGS[folder.toLowerCase() ] || folder;
+			}).join(path.sep);
+			if (! labels[name.toLowerCase()]) {
+			    console.log("No gmail label found for ", mailbox_folders[i]);
+			    create_labels.push(name);
 			}
-
-			//Find folders that don't have a label yet;
-			var create_labels = [];
-			for (i in mailbox_folders) {
-				var folder = mailbox_folders[i];
-
-				//Map the path name
-				var name  = _.map(folder.split(path.sep), function(folder) {
-					return  LABEL_MAPPINGS[folder] || folder;
-				}).join(path.sep);
-				if (! labels[name]) {
-					console.log("No gmail label found for ", mailbox_folders[i]);
-					create_labels.push(name);
+		    }
+		   		    
+		    var create = [];
+		    var actions = [];
+		    
+		    for (i in create_labels) {
+			var name = create_labels[i];
+			
+			//Create an array of Promise-returning functions to run in parallel:
+			actions.push(Q.nfbind(
+			    gmail.users.labels.create.bind(gmail.users.labels),
+			    {
+				userId: 'me',
+				resource: {
+				    name: name,
+				    labelListVisibility: 'labelShow',
+				    messageListVisibility: 'show'
 				}
-			}
-			var create = [];
-			var actions = [];
-
-			for (i in create_labels) {
-				var name = create_labels[i];
-
-				//Create an array of Promise-returning functions to run in parallel:
-				actions.push(Q.nfbind(
-					gmail.users.labels.create.bind(gmail.users.labels),
-					{
-						userId: 'me',
-						resource: {
-							name: name,
-							labelListVisibility: 'labelShow',
-							messageListVisibility: 'show'
-						}
-
-					})
-							)	
-			}
+				
+			    })
+				    )	
+		    }
 			
 			parallelCall(
 				actions
@@ -256,11 +268,12 @@ function createLabels(dir, subject_email, callback) {
 				.then(function(results) {
 					for (i in results) {
 						var response = results[i]
-						labels[response.name] = response.id;
+					    labels[response.name.toLowerCase()] = response.id;
 					}
 					console.log("Got final list of labels : ", labels);
-					//Now start migrating messages:
-					callback(labels);
+
+				    //Now start migrating messages:
+				    callback(labels);
 				} )
 				.catch(function(err) {
 					console.log("ERROR creating labels");
@@ -321,17 +334,16 @@ function importSpoolFiles(dir, subject_email, labels) {
 			
 			//Map the path name
 			var name =  _.map(folder.split(path.sep), function(folder) {
-				return  LABEL_MAPPINGS[folder] || folder;
+			    return  LABEL_MAPPINGS[folder.toLowerCase()] || folder;
 			}).join(path.sep);
 			
-			var label = labels[name];
+		    var label = labels[name.toLowerCase()];
 			console.log("Uploading file " + file + "Folder: " + folder + " -> Label: " + label);
 			console.log(relative, folder, label);
 			if (! label) {
 				throw new Error("No label found");
 			}
 			//			var file = path.join(spool_dir, files[i]);
-			
 			return { 
 				//A function to actually do the api call.  Q.nfbind wraps it in a promise-returning function:
 				value : Q.nfbind(
