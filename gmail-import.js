@@ -123,7 +123,7 @@ function parallelCall(actions)  {
 		if (active >= CONCURRENCY) return;
 		active ++;
 		retry_count = 0;
-		//A closure, to handle retrying this action:
+		//Handle retrying this action with exponential backoff
 		var retry = function(err, response) {
 			//Is the error a 403 response?
 		    console.log("Error in action", err, action);
@@ -179,6 +179,14 @@ function parallelCall(actions)  {
 	return deferred.promise;
 }
 
+function folderToLabelName(folder) {
+    var name =   LABEL_MAPPINGS[folder.toLowerCase() ] || folder.replace(/\s+/g, ' ');
+    return name;
+}
+function pathToLabelName(folder) {
+    return _.map(folder.split(path.sep), folderToLabelName).join(path.sep);
+}
+
 //Create all the folders in the mailbox as gmail labels
 function createLabels(dir, subject_email, callback) {
 	console.log('1. - Create labels in gmail for all folders for ' + subject_email);
@@ -228,15 +236,12 @@ function createLabels(dir, subject_email, callback) {
 			var folder = mailbox_folders[i];
 			
 			//Map the path name
-			var name  = _.map(folder.split(path.sep), function(folder) {
-			    return  LABEL_MAPPINGS[folder.toLowerCase() ] || folder;
-			}).join(path.sep);
+			var name = pathToLabelName(folder);
 			if (! labels[name.toLowerCase()]) {
-			    console.log("No gmail label found for ", mailbox_folders[i]);
+			    console.log("No gmail label found for folder: ", mailbox_folders[i], "Gmail Label", name);
 			    create_labels.push(name);
 			}
 		    }
-		   		    
 		    var create = [];
 		    var actions = [];
 		    
@@ -333,9 +338,7 @@ function importSpoolFiles(dir, subject_email, labels) {
 			var folder = path.dirname(relative);
 			
 			//Map the path name
-			var name =  _.map(folder.split(path.sep), function(folder) {
-			    return  LABEL_MAPPINGS[folder.toLowerCase()] || folder;
-			}).join(path.sep);
+		    var name =  folderToLabelName(folder)
 			
 		    var label = labels[name.toLowerCase()];
 			console.log("Uploading file " + file + "Folder: " + folder + " -> Label: " + label);
