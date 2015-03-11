@@ -9,17 +9,18 @@ var Q = require('q');
 var levelup = require('levelup')
 var util = require('util');
 
-console.log(process.argv);
+//console.log(process.argv);
 var spool_dir = process.argv[2];
 
 //You find these under "Security", API Reference https://console.developers.google.com
 var service_account_email = process.argv[3];
 var key_path =  process.argv[4];
 var subject_email = process.argv[5];
+var optional_subfolder = process.argv[6];
 
 
 if (! subject_email) {
-	console.log("Usage: node gmail-import.js [spool dir] [service account email] [key path] [email to migrate too]");
+	console.log("Usage: node gmail-import.js [spool dir] [service account email] [key path] [email to migrate too] [optional label to put all the mail under]");
 	process.exit();
 }
 
@@ -38,11 +39,14 @@ const IGNORE_FILES = ['cyrus.index', 'cyrus.cache', 'cyrus.header', 'cyrus.squat
 
 
 //Folder names to map to specific labels in gmail
+// Note gmail labels seem to be case insensitive.  List the lower case label on the left
 const LABEL_MAPPINGS = {
-	'sent' : 'inbox',//gmail doesn't seem to like you inserting directly in sent items
+//	'sent' : 'inbox',//gmail doesn't seem to like you inserting directly in sent items
+    'sent' : 'SENT',//gmail doesn't seem to like you inserting directly in sent items
     '.' : 'inbox',
-    'important' : 'important email',
-    'archive': 'archives' //Another reserved label name
+    'important' : 'Important Email',
+    'archive': 'Archives', //Another reserved label name
+    'visas' : 'Visa Emails' //What the hell is the problem with this?
 }
 
 //https://developers.google.com/admin-sdk/directory/v1/guides/delegation
@@ -62,7 +66,12 @@ var jwtClient = new googleapis.auth.JWT(
 );
 var authorising = false;
 
-var seen_db = levelup(path.join(process.env.HOME || process.env.HOMEPATH || process.env.USERPROFILE, '.gmail-raw-mail-import', subject_email));
+if (optional_subfolder) {
+    var seen_db = levelup(path.join(process.env.HOME || process.env.HOMEPATH || process.env.USERPROFILE, '.gmail-raw-mail-import', subject_email, optional_subfolder));
+}
+else {
+    var seen_db = levelup(path.join(process.env.HOME || process.env.HOMEPATH || process.env.USERPROFILE, '.gmail-raw-mail-import', subject_email));
+}
 
 
 //Runs google api calls, resolves a promise when they're all done, and does "Exponential backoff" like google likes
@@ -86,9 +95,9 @@ function parallelCall(actions)  {
 			}
 		}
 	}
-	console.log(typeof(actions));
+//	console.log(typeof(actions));
 
-	console.log("Running parallel actions");
+//	console.log("Running parallel actions");
 	var deferred = Q.defer();
 	var active = 0;
 	var results = [];
@@ -105,9 +114,9 @@ function parallelCall(actions)  {
 
 		var next_action = iter();
 		if (next_action.done) { 
-			console.log("No more actions to run, waiting on " + active + " actions to complete");
+//			console.log("No more actions to run, waiting on " + active + " actions to complete");
 			if (!active ) {
-				console.log("Completed all actions"); //DONE
+//				console.log("Completed all actions"); //DONE
 				deferred.resolve(results);
 			}
 			return;
@@ -116,7 +125,8 @@ function parallelCall(actions)  {
 		if (!next_action.value) {
 //			console.log("Starved the list of actions, waiting for more");
 			return setTimeout( function() {
-				next();
+			    active --;
+			    next();
 			}, 10 );
 		}
 
@@ -126,7 +136,7 @@ function parallelCall(actions)  {
 		//Handle retrying this action with exponential backoff
 		var retry = function(err, response) {
 			//Is the error a 403 response?
-		    console.log("Error in action", err, action);
+		    console.log("Error in action", require('util').inspect(err), action);
 			var exponential_backoff = function() {
 				retry_count ++;
 				var wait_seconds = 2 ^ retry_count;
@@ -173,18 +183,32 @@ function parallelCall(actions)  {
 		action().then(next).catch(retry).done();
 	}
 	for (i = 0 ;  i< CONCURRENCY;  i++ ) {
-		console.log("Firing off another action");
+//		console.log("Firing off another action");
 		next();
 	}
 	return deferred.promise;
 }
 
+//Convert paths to valid gmail labels.  Most of the rules for what is a valid gmail label seem to be undefined?
+// these were discovered by trial and error.
 function folderToLabelName(folder) {
-    var name =   LABEL_MAPPINGS[folder.toLowerCase() ] || folder.replace(/\s+/g, ' ');
+    var name =   LABEL_MAPPINGS[folder.toLowerCase() ] || folder;
+    //Leading and trailing whitespace must will result in "invalid label"
+    name = name.replace(/^\s+/,'');
+    name = name.replace(/\s+$/,'');
+
+    //So will more than one space:
+    name = name.replace(/\s+/g, ' ');
+
     return name;
 }
 function pathToLabelName(folder) {
-    return _.map(folder.split(path.sep), folderToLabelName).join(path.sep);
+    
+
+    var label  =  _.map(folder.split(path.sep), folderToLabelName).join(path.sep);
+    if (optional_subfolder) label = optional_subfolder + '/' + label;
+    return label;
+
 }
 
 //Create all the folders in the mailbox as gmail labels
@@ -223,10 +247,10 @@ function createLabels(dir, subject_email, callback) {
 
 
 		    var current_labels = _.pluck( response.labels, 'name');
-		    for (i in  current_labels.sort()) {
+/*		    for (i in  current_labels.sort()) {
 			console.log(current_labels[i]);			
 		    }
-	    
+*/	    
 
 
 		    //Find folders that don't have a label yet;
@@ -238,13 +262,13 @@ function createLabels(dir, subject_email, callback) {
 			//Map the path name
 			var name = pathToLabelName(folder);
 			if (! labels[name.toLowerCase()]) {
-			    console.log("No gmail label found for folder: ", mailbox_folders[i], "Gmail Label", name);
+			    console.log("No gmail label found for folder: '" + mailbox_folders[i] + "' ; Gmail Label:'" + name + "'"); //'
 			    create_labels.push(name);
 			}
 		    }
+
 		    var create = [];
 		    var actions = [];
-		    
 		    for (i in create_labels) {
 			var name = create_labels[i];
 			
@@ -263,7 +287,7 @@ function createLabels(dir, subject_email, callback) {
 				    )	
 		    }
 			
-			parallelCall(
+		    parallelCall(
 				actions
 			)
 				.progress( function(result) {
@@ -275,7 +299,7 @@ function createLabels(dir, subject_email, callback) {
 						var response = results[i]
 					    labels[response.name.toLowerCase()] = response.id;
 					}
-					console.log("Got final list of labels : ", labels);
+//				    console.log("Got final list of labels : ", labels);
 
 				    //Now start migrating messages:
 				    callback(labels);
@@ -298,7 +322,7 @@ function importSpoolFiles(dir, subject_email, labels) {
 	//This walks the spool adding all the files to a queue for the google api requests to consume.
 	// Note we're doing this in parallel with the process of transmitting the files to google, because in a large spool this can take a while.
 	walk.files(dir, function(basedir, filename, stat, next) {
-	    
+//	    if (!basedir.match(/.*Sent$/i)) return next();
 
 
 		for (i in IGNORE_DIRS) {
@@ -319,7 +343,7 @@ function importSpoolFiles(dir, subject_email, labels) {
 				files.push(file);
 			}
 			else {
-				console.log("Seen  " + file, err, value);
+			    //console.log("Seen  " + file, err, value);
 			}
 		})
 
@@ -338,8 +362,7 @@ function importSpoolFiles(dir, subject_email, labels) {
 			var folder = path.dirname(relative);
 			
 			//Map the path name
-		    var name =  folderToLabelName(folder)
-			
+		    var name =  pathToLabelName(folder)
 		    var label = labels[name.toLowerCase()];
 			console.log("Uploading file " + file + "Folder: " + folder + " -> Label: " + label);
 			console.log(relative, folder, label);
