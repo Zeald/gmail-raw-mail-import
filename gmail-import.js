@@ -9,15 +9,24 @@ var Q = require('q');
 var levelup = require('levelup')
 var util = require('util');
 
+var argv = require('yargs').argv;
+console.log(argv);
+
 //console.log(process.argv);
-var spool_dir = process.argv[2];
+var spool_dir = argv._[0];
 
 //You find these under "Security", API Reference https://console.developers.google.com
-var service_account_email = process.argv[3];
-var key_path =  process.argv[4];
-var subject_email = process.argv[5];
-var optional_subfolder = process.argv[6];
+var service_account_email = argv._[1];
+var key_path =  argv._[2];
+var subject_email = argv._[3];
+var optional_subfolder = argv._[4];
 
+
+var options = {
+    flatten: argv.flatten,
+    include_trash: argv['include-trash'],
+    include_drafts: argv['include-drafts']
+};
 
 if (! subject_email) {
 	console.log("Usage: node gmail-import.js [spool dir] [service account email] [key path] [email to migrate too] [optional label to put all the mail under]");
@@ -34,7 +43,15 @@ const SCOPES = [
 ];
 
 //Dirs to ignore: tweak for your setup
-const IGNORE_DIRS = ['servers', 'templates', 'users', 'Trash', 'Junk', 'Drafts'];
+var IGNORE_DIRS = ['servers', 'templates', 'users'];
+if (! options.include_drafts ) {
+    IGNORE_DIRS.push('Drafts');
+}
+if (! options.include_trash ) {
+    IGNORE_DIRS.push('Trash');
+}
+
+
 const IGNORE_FILES = ['cyrus.index', 'cyrus.cache', 'cyrus.header', 'cyrus.squat']
 
 
@@ -42,7 +59,7 @@ const IGNORE_FILES = ['cyrus.index', 'cyrus.cache', 'cyrus.header', 'cyrus.squat
 // Note gmail labels seem to be case insensitive.  List the lower case label on the left
 const LABEL_MAPPINGS = {
 //	'sent' : 'inbox',//gmail doesn't seem to like you inserting directly in sent items
-    'sent' : 'SENT',//gmail doesn't seem to like you inserting directly in sent items
+    'sent' : 'inbox',//gmail doesn't seem to like you inserting directly in sent items
     '.' : 'inbox',
     'important' : 'Important Email',
     'archive': 'Archives', //Another reserved label name
@@ -65,13 +82,14 @@ var jwtClient = new googleapis.auth.JWT(
 	subject_email
 );
 var authorising = false;
-
 if (optional_subfolder) {
-    var seen_db = levelup(path.join(process.env.HOME || process.env.HOMEPATH || process.env.USERPROFILE, '.gmail-raw-mail-import', subject_email, optional_subfolder));
-}
+    var seen_db_path = path.join(process.env.HOME || process.env.HOMEPATH || process.env.USERPROFILE, '.gmail-raw-mail-import', subject_email, optional_subfolder);
+} 
 else {
-    var seen_db = levelup(path.join(process.env.HOME || process.env.HOMEPATH || process.env.USERPROFILE, '.gmail-raw-mail-import', subject_email));
+    var seen_db_path = path.join(process.env.HOME || process.env.HOMEPATH || process.env.USERPROFILE, '.gmail-raw-mail-import', subject_email);
 }
+//fs.mkdirSync(seen_db_path);
+var seen_db = levelup(seen_db_path);
 
 
 //Runs google api calls, resolves a promise when they're all done, and does "Exponential backoff" like google likes
@@ -203,9 +221,23 @@ function folderToLabelName(folder) {
     return name;
 }
 function pathToLabelName(folder) {
-    
-
     var label  =  _.map(folder.split(path.sep), folderToLabelName).join(path.sep);
+
+    console.log('L:',label);
+    if (options.flatten) {
+	if (label.toLowerCase() == 'drafts' || label.toLowerCase() == 'trash' ) {
+	    //If we aren't ignoring drafts or trash, need them in.
+	    console.log('Drafts');
+	}
+	else if (optional_subfolder ) {
+	    return optional_subfolder ;
+	}
+	else {
+	    label  =  'inbox';
+	}
+
+    }
+
     if (optional_subfolder) label = optional_subfolder + '/' + label;
     return label;
 
@@ -237,6 +269,7 @@ function createLabels(dir, subject_email, callback) {
 			userId: subject_email
 		}, 
 		function(err, response) {
+		    console.log(response);
 		    if (err) {
 			console.log('ERROR finding labels', err);
 			process.exit();
@@ -246,16 +279,18 @@ function createLabels(dir, subject_email, callback) {
 		    }
 
 
+		    if (optional_subfolder) {
+			mailbox_folders.push(optional_subfolder);
+		    }
+
 		    var current_labels = _.pluck( response.labels, 'name');
 /*		    for (i in  current_labels.sort()) {
 			console.log(current_labels[i]);			
 		    }
 */	    
 
-
 		    //Find folders that don't have a label yet;
 		    var create_labels = [];
-
 		    for (i in mailbox_folders) {
 			var folder = mailbox_folders[i];
 			
@@ -266,6 +301,7 @@ function createLabels(dir, subject_email, callback) {
 			    create_labels.push(name);
 			}
 		    }
+		    
 
 		    var create = [];
 		    var actions = [];
@@ -364,8 +400,9 @@ function importSpoolFiles(dir, subject_email, labels) {
 			//Map the path name
 		    var name =  pathToLabelName(folder)
 		    var label = labels[name.toLowerCase()];
-			console.log("Uploading file " + file + "Folder: " + folder + " -> Label: " + label);
-			console.log(relative, folder, label);
+		    
+		    console.log(relative, folder, label);
+
 			if (! label) {
 				throw new Error("No label found");
 			}
@@ -438,7 +475,6 @@ function importSpoolFiles(dir, subject_email, labels) {
 		.done( function(results) {
 			console.log("Migrated dir " + dir , results);
 		})
-
 	;	
 }
 
