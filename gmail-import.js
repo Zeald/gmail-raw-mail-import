@@ -10,7 +10,7 @@ var levelup = require('levelup')
 var util = require('util');
 
 var argv = require('yargs').argv;
-console.log(argv);
+//console.log(argv);
 
 //console.log(process.argv);
 var spool_dir = argv._[0];
@@ -90,7 +90,7 @@ else {
 }
 //fs.mkdirSync(seen_db_path);
 var seen_db = levelup(seen_db_path);
-
+var retry_count = 0;
 
 //Runs google api calls, resolves a promise when they're all done, and does "Exponential backoff" like google likes
 // actions is an array of Promise-wrapped function (ie Q.nfcall).  Returns a promise for all the actions to be done.
@@ -128,7 +128,6 @@ function parallelCall(actions)  {
 			results.push(result[0]);
 			deferred.notify(result[0]);
 		}
-		var retry_count = 0;
 
 		var next_action = iter();
 		if (next_action.done) { 
@@ -157,7 +156,7 @@ function parallelCall(actions)  {
 		    console.log("Error in action", require('util').inspect(err), action);
 			var exponential_backoff = function() {
 				retry_count ++;
-				var wait_seconds = 2 ^ retry_count;
+			    var wait_seconds = Math.pow(2, retry_count);
 				if (wait_seconds > MAX_WAIT) {
 					console.log("Asked to wait more than MAX_WAIT seconds, so dieing");
 				}
@@ -223,7 +222,7 @@ function folderToLabelName(folder) {
 function pathToLabelName(folder) {
     var label  =  _.map(folder.split(path.sep), folderToLabelName).join(path.sep);
 
-    console.log('L:',label);
+//    console.log('L:',label);
     if (options.flatten) {
 	if (label.toLowerCase() == 'drafts' || label.toLowerCase() == 'trash' ) {
 	    //If we aren't ignoring drafts or trash, need them in.
@@ -302,7 +301,7 @@ function createLabels(dir, subject_email, callback) {
 			}
 		    }
 		    
-
+		    create_labels = _.uniq(create_labels);
 		    var create = [];
 		    var actions = [];
 		    for (i in create_labels) {
@@ -328,7 +327,7 @@ function createLabels(dir, subject_email, callback) {
 			)
 				.progress( function(result) {
 					//Created label
-					console.log(result);
+					//console.log(result);
 				})
 				.then(function(results) {
 					for (i in results) {
@@ -469,7 +468,7 @@ function importSpoolFiles(dir, subject_email, labels) {
 			console.log(elapsed +"s Migrated " + migrated_count + "/" + (files.length + migrated_count) + " " + percent + "% " +  messages_per_hour + "p/h ETA: " + eta + 'h');
 		} )
 		.fail(function(err) {
-			console.error('ERROR');
+		    console.error('ERROR', err);
 			process.exit();
 		})
 		.done( function(results) {
